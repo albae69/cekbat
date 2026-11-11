@@ -17,13 +17,15 @@
 - **Device info** — model identifier, chip, memory, macOS version.
 - **iPhone inspection** — name, model, iOS version, level, cycle count, health, temperature of a connected iPhone (requires `libimobiledevice`).
 - **History** — records cycle count over time and shows the increase per month for both Mac and iPhone.
-- **Self-check CLI** — `--json` and `--history` for scripting or quick diagnostics.
+- **Import coconutBattery history** — reads coconutBattery 4 `.ccba` exports and merges them into the history.
+- **Self-check CLI** — `--json`, `--history`, and `--import` for scripting or quick diagnostics.
 
 ## Requirements
 
 - macOS 13 or later.
 - Xcode Command Line Tools (`xcode-select --install`) — for `swiftc`.
 - Optional, for iPhone support: `brew install libimobiledevice`.
+- Optional, for importing coconutBattery history: coconutBattery 4 installed (the export key is read from its binary).
 - The iPhone must be connected via USB and unlocked; tap **Trust** when prompted.
 
 ## Build
@@ -52,7 +54,14 @@ CLI:
 ```sh
 build/CekBat.app/Contents/MacOS/CekBat --json      # snapshot as JSON
 build/CekBat.app/Contents/MacOS/CekBat --history   # monthly cycle deltas
+build/CekBat.app/Contents/MacOS/CekBat --import "coconutBattery Data ios.ccba"
 ```
+
+## Importing coconutBattery history
+
+Use **Import .ccba…** in the History tab, or `--import <file>`.
+
+The `.ccba` container is an AES-GCM sealed box (key embedded in the coconutBattery binary, read at import time) wrapping LZFSE-compressed JSON. Records are merged by snapshot time, so re-importing the same file is a no-op. Mac snapshots feed the Mac column, all other devices the iPhone column.
 
 ## How data is read
 
@@ -79,13 +88,14 @@ Delete the file to reset history.
 ## Limitations
 
 - Cycle count on iPhone is only available from macOS via `libimobiledevice`; iOS apps have no API for it.
+- Imported coconutBattery data is grouped by device type (Mac vs iPhone), not by serial number.
 - Battery condition thresholds follow Apple guidance (`Service recommended` at 1000+ cycles). Health is calculated from `AppleRawMaxCapacity / DesignCapacity`.
-- History starts empty on first launch; older months cannot be backfilled.
+- History starts empty on first launch; older months cannot be backfilled except from a coconutBattery export.
 
 ## Project structure
 
 ```
-CekBat.swift   UI, battery/device readers, history store
+CekBat.swift   UI, battery/device readers, .ccba import, history store
 Info.plist     App bundle metadata
 build.sh       Compiles and bundles build/CekBat.app
 assets/        Branding assets

@@ -1,6 +1,8 @@
 import AppKit
+import CryptoKit
 import SwiftUI
 import IOKit
+import UniformTypeIdentifiers
 
 func sysctlString(_ name: String) -> String {
     var size = 0
@@ -178,6 +180,67 @@ enum Store {
     }
 }
 
+extension Store {
+    static func merge(records: [(ts: Double, mac: Int?, phone: Int?)]) {
+        var byTime: [Int: Entry] = [:]
+        for e in load() { byTime[Int(e.ts)] = e }
+        for r in records {
+            let key = Int(r.ts)
+            if var e = byTime[key] {
+                e.mac = r.mac ?? e.mac
+                e.phone = r.phone ?? e.phone
+                byTime[key] = e
+            } else {
+                byTime[key] = Entry(ts: r.ts, mac: r.mac, phone: r.phone)
+            }
+        }
+        let all = byTime.values.sorted { $0.ts < $1.ts }
+        if let d = try? JSONEncoder().encode(all) { try? d.write(to: url) }
+    }
+}
+
+/// coconutBattery 4 ".ccba": AES-GCM sealed box -> LZFSE -> JSON.
+/// Key is not shipped here; it is read from the installed coconutBattery binary.
+enum Coconut {
+    enum ImportError: LocalizedError {
+        case notInstalled, invalidFile
+        var errorDescription: String? {
+            switch self {
+            case .notInstalled: "coconutBattery not installed"
+            case .invalidFile: "Not a coconutBattery .ccba export"
+            }
+        }
+    }
+
+    static func importRecords(from file: URL) throws -> [(ts: Double, mac: Int?, phone: Int?)] {
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.coconut-flavour.coconutBattery"),
+              let binary = Bundle(url: app)?.executableURL.flatMap({ try? Data(contentsOf: $0) })
+        else { throw ImportError.notInstalled }
+
+        let text = String(decoding: binary, as: UTF8.self)
+        let re = try NSRegularExpression(pattern: "[A-Za-z0-9+/]{43}=")
+        let keys = re.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { m -> SymmetricKey? in
+            guard let r = Range(m.range, in: text),
+                  let d = Data(base64Encoded: String(text[r])), d.count == 32 else { return nil }
+            return SymmetricKey(data: d)
+        }
+
+        let data = try Data(contentsOf: file)
+        guard let box = try? AES.GCM.SealedBox(combined: data),
+              let plain = keys.lazy.compactMap({ try? AES.GCM.open(box, using: $0) }).first,
+              let json = try? (plain as NSData).decompressed(using: .lzfse) as Data,
+              let records = try? JSONSerialization.jsonObject(with: json) as? [[String: Any]]
+        else { throw ImportError.invalidFile }
+
+        return records.compactMap { r in
+            guard let ts = r["Data.SnapshotDate"] as? Double else { return nil }
+            let cycles = r["Battery.CycleCount"] as? Int
+            let isMac = r["Data.Type"] as? String == "Mac"
+            return (ts, isMac ? cycles : nil, isMac ? nil : cycles)
+        }
+    }
+}
+
 struct Snapshot {
     var level = 0
     var cycles = 0
@@ -301,6 +364,18 @@ struct CekBatApp: App {
             print(Store.report())
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--import"),
+           CommandLine.arguments.indices.contains(i + 1) {
+            do {
+                let records = try Coconut.importRecords(from: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+                Store.merge(records: records)
+                print("imported \(records.count) entries")
+            } catch {
+                print("error: \(error.localizedDescription)")
+                exit(1)
+            }
+            exit(0)
+        }
         DispatchQueue.main.async {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
@@ -393,6 +468,7 @@ struct NowView: View {
 }
 
 struct HistoryView: View {
+    @State private var message = ""
     private var rows: [Store.Month] { Store.months() }
 
     var body: some View {
@@ -429,9 +505,34 @@ struct HistoryView: View {
                     }
                 }
             }
+
+            HStack(spacing: 8) {
+                Button("Import .ccba…") { importFiles() }
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .font(.callout)
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func importFiles() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "ccba") ?? .data]
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK else { return }
+        var total = 0
+        do {
+            for url in panel.urls {
+                let records = try Coconut.importRecords(from: url)
+                Store.merge(records: records)
+                total += records.count
+            }
+            message = "Imported \(total) entries"
+        } catch {
+            message = error.localizedDescription
+        }
     }
 }
